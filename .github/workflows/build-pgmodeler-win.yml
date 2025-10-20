@@ -1,0 +1,71 @@
+name: build-pgmodeler-win
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MSYS2 with MinGW64 + Qt6 + PostgreSQL
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-qt6
+            mingw-w64-x86_64-postgresql
+# setup-msys2 provides a ready MSYS2+MinGW64 environment in Actions.  :contentReference[oaicite:1]{index=1}
+
+      - name: Fetch pgModeler 1.2.2 source
+        shell: bash
+        run: |
+          curl -L "https://pgmodeler.io/files/v1.2.2/pgmodeler-1.2.2.tar.gz" -o pgmodeler-1.2.2.tar.gz
+          tar xzf pgmodeler-1.2.2.tar.gz
+          mv pgmodeler-1.2.2 src
+
+      - name: Patch dependency paths in pgmodeler.pri
+        shell: msys2 {0}
+        run: |
+          cd src
+          sed -i 's|^PGSQL_LIB *=.*|PGSQL_LIB = C:/msys64/mingw64/bin/libpq.dll|' pgmodeler.pri
+          sed -i 's|^PGSQL_INC *=.*|PGSQL_INC = C:/msys64/mingw64/include|' pgmodeler.pri
+          sed -i 's|^XML_INC *=.*|XML_INC = C:/msys64/mingw64/include/libxml2|' pgmodeler.pri
+          sed -i 's|^XML_LIB *=.*|XML_LIB = C:/msys64/mingw64/bin/libxml2-2.dll|' pgmodeler.pri
+# pgModeler’s install page shows the .pri vars; we point them at MSYS2’s Qt/PostgreSQL/libxml2. :contentReference[oaicite:2]{index=2}
+
+      - name: Build + install
+        shell: msys2 {0}
+        env:
+          INSTALLATION_ROOT: C:/_install/pgmodeler
+        run: |
+          cd src
+          qmake-qt6 -r CONFIG+=release PREFIX=$INSTALLATION_ROOT pgmodeler.pro
+          make -j$(nproc)
+          make install
+          cd "$INSTALLATION_ROOT"
+          # Bundle Qt runtime
+          windeployqt-qt6 pgmodeler.exe gui.dll
+          # Bundle common runtime DLLs
+          cp /mingw64/bin/libpq.dll .
+          cp /mingw64/bin/libxml2-2.dll .
+          cp /mingw64/bin/libwinpthread-1.dll .
+          cp /mingw64/bin/libstdc++-6.dll .
+          cp /mingw64/bin/libgcc_s_seh-1.dll .
+# windeployqt collects Qt6 plugins/DLLs for Windows apps. :contentReference[oaicite:3]{index=3}
+
+      - name: Package artifact
+        shell: bash
+        run: 7z a pgmodeler-1.2.2-win64.zip C:\\_install\\pgmodeler\\*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgmodeler-1.2.2-win64
+          path: pgmodeler-1.2.2-win64.zip
