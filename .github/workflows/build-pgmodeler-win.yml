@@ -10,23 +10,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install MSYS2 with MinGW64 + Qt6 + PostgreSQL
+      - name: Install MSYS2 with MinGW64 + Qt6 + PostgreSQL + libxml2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
           install: >-
             base-devel
-            mingw-w64-x86_64-make
             mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
             mingw-w64-x86_64-qt6
             mingw-w64-x86_64-postgresql
             mingw-w64-x86_64-libxml2
-
-      - name: (Optional) List libxml2 files
-        shell: msys2 {0}
-        run: |
-          pacman -Ql mingw-w64-x86_64-libxml2 | sed -n '1,120p' || true
+            ntldd
 
       - name: Fetch pgModeler 1.2.2 source
         shell: bash
@@ -35,38 +31,47 @@ jobs:
           tar xzf pgmodeler-1.2.2.tar.gz
           mv pgmodeler-1.2.2 src
 
-      - name: Patch dependency paths in pgmodeler.pri
-        shell: msys2 {0}
-        run: |
-          cd src
-          sed -i 's|^PGSQL_LIB *=.*|PGSQL_LIB = C:/msys64/mingw64/bin/libpq.dll|' pgmodeler.pri
-          sed -i 's|^PGSQL_INC *=.*|PGSQL_INC = C:/msys64/mingw64/include|' pgmodeler.pri
-          sed -i 's|^XML_INC *=.*|XML_INC = C:/msys64/mingw64/include/libxml2|' pgmodeler.pri
-          # Leave XML_LIB as-is or blank; runtime DLL will be copied dynamically below.
-          sed -i 's|^XML_LIB *=.*|XML_LIB =|' pgmodeler.pri
-
-      - name: Build + install
+      - name: Build + install (override include/lib vars on qmake cmdline)
         shell: msys2 {0}
         env:
           INSTALLATION_ROOT: C:/_install/pgmodeler
+          # Windows-style paths are fine with qmake; MSYS2 maps C:\msys64 → /
+          PG_INC: C:/msys64/mingw64/include
+          XML_INC: C:/msys64/mingw64/include/libxml2
+          PG_DLL: C:/msys64/mingw64/bin/libpq.dll
         run: |
           set -e
+          echo "Sanity: showing key paths"
+          ls -l /mingw64/include/libxml2/libxml/parser.h
+          ls -ld /mingw64/include/libxml2
+          ls -l /mingw64/bin | sed -n '1,5p'
+
           cd src
-          qmake-qt6 -r CONFIG+=release PREFIX=$INSTALLATION_ROOT pgmodeler.pro
-          make -j$(nproc)
+          # Show qmake info
+          qmake-qt6 -query
+
+          # Configure with explicit overrides (no editing .pri):
+          qmake-qt6 -r \
+            CONFIG+=release \
+            PREFIX=$INSTALLATION_ROOT \
+            PGSQL_INC="$PG_INC" \
+            PGSQL_LIB="$PG_DLL" \
+            XML_INC="$XML_INC" \
+            pgmodeler.pro
+
+          make -j"$(nproc)"
           make install
 
           cd "$INSTALLATION_ROOT"
 
-          # Find the correct windeployqt name (varies across Qt builds)
+          # Pick the right windeployqt name
           which windeployqt-qt6 >/dev/null 2>&1 && WDEPLOY=windeployqt-qt6 || WDEPLOY=windeployqt
           echo "Using $WDEPLOY"
           $WDEPLOY pgmodeler.exe gui.dll
 
-          # Always copy PostgreSQL client DLL
+          # Bundle DLLs (discover dynamically)
           cp /mingw64/bin/libpq.dll . || true
 
-          # Discover and copy whatever libxml2 DLL MSYS2 provides
           XML_DLL=$(ls /mingw64/bin/libxml2*.dll 2>/dev/null | head -n1 || true)
           if [ -n "$XML_DLL" ]; then
             echo "Copying $(basename "$XML_DLL")"
@@ -75,15 +80,13 @@ jobs:
             echo "WARNING: libxml2 runtime DLL not found under /mingw64/bin"
           fi
 
-          # Common MinGW runtime DLLs (copy if present)
           for f in /mingw64/bin/libwinpthread-1.dll \
                    /mingw64/bin/libstdc++-6.dll \
                    /mingw64/bin/libgcc_s_seh-1.dll; do
             [ -f "$f" ] && cp "$f" . || true
           done
 
-          # Safety net: copy any missing deps reported by ntldd
-          which ntldd >/dev/null 2>&1 || pacman -S --noconfirm ntldd
+          # Sweep any remaining DLL deps
           ntldd -R pgmodeler.exe | awk '/mingw64\\\\bin/ {print $3}' | while read -r P; do
             MSYSPATH=$(cygpath "$P")
             [ -f "$MSYSPATH" ] && cp -u "$MSYSPATH" . || true
