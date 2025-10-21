@@ -35,6 +35,16 @@ jobs:
           tar xzf pgmodeler-1.2.2.tar.gz
           mv pgmodeler-1.2.2 src
 
+      - name: Patch dependency paths in pgmodeler.pri
+        shell: msys2 {0}
+        run: |
+          cd src
+          sed -i 's|^PGSQL_LIB *=.*|PGSQL_LIB = C:/msys64/mingw64/bin/libpq.dll|' pgmodeler.pri
+          sed -i 's|^PGSQL_INC *=.*|PGSQL_INC = C:/msys64/mingw64/include|' pgmodeler.pri
+          sed -i 's|^XML_INC *=.*|XML_INC = C:/msys64/mingw64/include/libxml2|' pgmodeler.pri
+          # Leave XML_LIB as-is or blank; runtime DLL will be copied dynamically below.
+          sed -i 's|^XML_LIB *=.*|XML_LIB =|' pgmodeler.pri
+
       - name: Build + install
         shell: msys2 {0}
         env:
@@ -42,29 +52,21 @@ jobs:
         run: |
           set -e
           cd src
-
-          # Pass the paths directly to qmake (overrides .pri defaults)
-          qmake-qt6 -r CONFIG+=release PREFIX=$INSTALLATION_ROOT \
-            PGSQL_LIB="C:/msys64/mingw64/bin/libpq.dll" \
-            PGSQL_INC="C:/msys64/mingw64/include" \
-            XML_INC="C:/msys64/mingw64/include/libxml2" \
-            XML_LIB="C:/msys64/mingw64/bin/libxml2-2.dll" \
-            pgmodeler.pro
-
+          qmake-qt6 -r CONFIG+=release PREFIX=$INSTALLATION_ROOT pgmodeler.pro
           make -j$(nproc)
           make install
 
           cd "$INSTALLATION_ROOT"
 
-          # Find the correct windeployqt (name may vary)
+          # Find the correct windeployqt name (varies across Qt builds)
           which windeployqt-qt6 >/dev/null 2>&1 && WDEPLOY=windeployqt-qt6 || WDEPLOY=windeployqt
           echo "Using $WDEPLOY"
           $WDEPLOY pgmodeler.exe gui.dll
 
-          # PostgreSQL client DLL
+          # Always copy PostgreSQL client DLL
           cp /mingw64/bin/libpq.dll . || true
 
-          # Discover and copy libxml2 runtime (filename can change)
+          # Discover and copy whatever libxml2 DLL MSYS2 provides
           XML_DLL=$(ls /mingw64/bin/libxml2*.dll 2>/dev/null | head -n1 || true)
           if [ -n "$XML_DLL" ]; then
             echo "Copying $(basename "$XML_DLL")"
@@ -73,14 +75,14 @@ jobs:
             echo "WARNING: libxml2 runtime DLL not found under /mingw64/bin"
           fi
 
-          # Common MinGW runtimes
+          # Common MinGW runtime DLLs (copy if present)
           for f in /mingw64/bin/libwinpthread-1.dll \
                    /mingw64/bin/libstdc++-6.dll \
                    /mingw64/bin/libgcc_s_seh-1.dll; do
             [ -f "$f" ] && cp "$f" . || true
           done
 
-          # Safety net: pull any remaining deps
+          # Safety net: copy any missing deps reported by ntldd
           which ntldd >/dev/null 2>&1 || pacman -S --noconfirm ntldd
           ntldd -R pgmodeler.exe | awk '/mingw64\\\\bin/ {print $3}' | while read -r P; do
             MSYSPATH=$(cygpath "$P")
