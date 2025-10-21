@@ -21,6 +21,7 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-qt6
             mingw-w64-x86_64-postgresql
+            mingw-w64-x86_64-libxml2
 # setup-msys2 provides a ready MSYS2+MinGW64 environment in Actions.  :contentReference[oaicite:1]{index=1}
 
       - name: Fetch pgModeler 1.2.2 source
