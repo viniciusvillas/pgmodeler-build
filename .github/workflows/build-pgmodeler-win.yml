@@ -22,12 +22,12 @@ jobs:
             mingw-w64-x86_64-qt6
             mingw-w64-x86_64-postgresql
             mingw-w64-x86_64-libxml2
-# setup-msys2 provides a ready MSYS2+MinGW64 environment in Actions.  :contentReference[oaicite:1]{index=1}
-      - name: Sanity check libxml2
+
+      - name: (Optional) List libxml2 files
         shell: msys2 {0}
         run: |
-          ls -l /mingw64/include/libxml2/libxml/parser.h || (echo "missing headers" && exit 1)
-          ls -l /mingw64/bin/libxml2-2.dll || (echo "missing dll" && exit 1)
+          pacman -Ql mingw-w64-x86_64-libxml2 | sed -n '1,120p' || true
+
       - name: Fetch pgModeler 1.2.2 source
         shell: bash
         run: |
@@ -42,28 +42,52 @@ jobs:
           sed -i 's|^PGSQL_LIB *=.*|PGSQL_LIB = C:/msys64/mingw64/bin/libpq.dll|' pgmodeler.pri
           sed -i 's|^PGSQL_INC *=.*|PGSQL_INC = C:/msys64/mingw64/include|' pgmodeler.pri
           sed -i 's|^XML_INC *=.*|XML_INC = C:/msys64/mingw64/include/libxml2|' pgmodeler.pri
-          sed -i 's|^XML_LIB *=.*|XML_LIB = C:/msys64/mingw64/bin/libxml2-2.dll|' pgmodeler.pri
-# pgModeler’s install page shows the .pri vars; we point them at MSYS2’s Qt/PostgreSQL/libxml2. :contentReference[oaicite:2]{index=2}
+          # Leave XML_LIB as-is or blank; runtime DLL will be copied dynamically below.
+          sed -i 's|^XML_LIB *=.*|XML_LIB =|' pgmodeler.pri
 
       - name: Build + install
         shell: msys2 {0}
         env:
           INSTALLATION_ROOT: C:/_install/pgmodeler
         run: |
+          set -e
           cd src
           qmake-qt6 -r CONFIG+=release PREFIX=$INSTALLATION_ROOT pgmodeler.pro
           make -j$(nproc)
           make install
+
           cd "$INSTALLATION_ROOT"
-          # Bundle Qt runtime
-          windeployqt-qt6 pgmodeler.exe gui.dll
-          # Bundle common runtime DLLs
-          cp /mingw64/bin/libpq.dll .
-          cp /mingw64/bin/libxml2-2.dll .
-          cp /mingw64/bin/libwinpthread-1.dll .
-          cp /mingw64/bin/libstdc++-6.dll .
-          cp /mingw64/bin/libgcc_s_seh-1.dll .
-# windeployqt collects Qt6 plugins/DLLs for Windows apps. :contentReference[oaicite:3]{index=3}
+
+          # Find the correct windeployqt name (varies across Qt builds)
+          which windeployqt-qt6 >/dev/null 2>&1 && WDEPLOY=windeployqt-qt6 || WDEPLOY=windeployqt
+          echo "Using $WDEPLOY"
+          $WDEPLOY pgmodeler.exe gui.dll
+
+          # Always copy PostgreSQL client DLL
+          cp /mingw64/bin/libpq.dll . || true
+
+          # Discover and copy whatever libxml2 DLL MSYS2 provides
+          XML_DLL=$(ls /mingw64/bin/libxml2*.dll 2>/dev/null | head -n1 || true)
+          if [ -n "$XML_DLL" ]; then
+            echo "Copying $(basename "$XML_DLL")"
+            cp "$XML_DLL" .
+          else
+            echo "WARNING: libxml2 runtime DLL not found under /mingw64/bin"
+          fi
+
+          # Common MinGW runtime DLLs (copy if present)
+          for f in /mingw64/bin/libwinpthread-1.dll \
+                   /mingw64/bin/libstdc++-6.dll \
+                   /mingw64/bin/libgcc_s_seh-1.dll; do
+            [ -f "$f" ] && cp "$f" . || true
+          done
+
+          # Safety net: copy any missing deps reported by ntldd
+          which ntldd >/dev/null 2>&1 || pacman -S --noconfirm ntldd
+          ntldd -R pgmodeler.exe | awk '/mingw64\\\\bin/ {print $3}' | while read -r P; do
+            MSYSPATH=$(cygpath "$P")
+            [ -f "$MSYSPATH" ] && cp -u "$MSYSPATH" . || true
+          done
 
       - name: Package artifact
         shell: bash
